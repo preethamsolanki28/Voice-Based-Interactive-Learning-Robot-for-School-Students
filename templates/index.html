@@ -1,0 +1,1765 @@
+<!DOCTYPE html>
+<!--
+  Voice Chatbot — Single Page Application
+  ─────────────────────────────────────────
+  Architecture:
+    • Speech-to-Text  → browser Web Speech API   (SpeechRecognition)
+    • LLM             → Flask /chat → OpenRouter  (server-side)
+    • Text-to-Speech  → browser SpeechSynthesis   (speechSynthesis)
+
+  State machine: idle → recording → processing → speaking → error
+  Each state controls what the UI looks like and what clicks do.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice-Based Interactive Learning Robot for School Students</title>
+
+  <!-- Google Fonts — Inter for clean, modern typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ═══════════════════════════════════════════════════════════════════════
+       1. DESIGN TOKENS — change colours/sizes here, they cascade everywhere
+       ═══════════════════════════════════════════════════════════════════════ */
+    :root {
+      /* Background layers */
+      --bg-deep:          #080810;
+      --bg-mid:           #10101c;
+      --bg-card:          rgba(255, 255, 255, 0.04);
+
+      /* Glass surfaces */
+      --glass-border:     rgba(255, 255, 255, 0.08);
+      --glass-hover:      rgba(255, 255, 255, 0.07);
+
+      /* Brand accent — violet */
+      --accent:           #7c3aed;
+      --accent-dark:      #5b21b6;
+      --accent-glow:      rgba(124, 58, 237, 0.45);
+      --accent-light:     #a78bfa;
+
+      /* State colours */
+      --cyan:             #22d3ee;           /* speaking */
+      --cyan-glow:        rgba(34, 211, 238, 0.35);
+      --red:              #ef4444;           /* recording / error */
+      --red-glow:         rgba(239, 68, 68, 0.4);
+      --amber:            #f59e0b;           /* processing */
+
+      /* Text */
+      --text-primary:     #f1f0f8;
+      --text-secondary:   #8b8baa;
+      --text-muted:       #4a4a6a;
+
+      /* Shape */
+      --radius-sm:        10px;
+      --radius-md:        18px;
+      --radius-lg:        28px;
+      --radius-xl:        40px;
+
+      /* Motion */
+      --ease-out:         cubic-bezier(0.22, 1, 0.36, 1);
+      --ease-in-out:      cubic-bezier(0.4, 0, 0.2, 1);
+      --transition-fast:  0.15s var(--ease-in-out);
+      --transition:       0.25s var(--ease-in-out);
+      --transition-slow:  0.4s  var(--ease-out);
+
+      /* Layout */
+      --chat-max-width:   700px;
+      --chat-height:      calc(100vh - 280px);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       2. RESET & BASE
+       ═══════════════════════════════════════════════════════════════════════ */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      height: 100%;
+      /* Smooth scrolling for the chat log */
+      scroll-behavior: smooth;
+    }
+
+    body {
+      /* Rich dark background with a purple hint on the left */
+      background:
+        radial-gradient(ellipse 80% 60% at 10% 40%, rgba(76, 29, 149, 0.18) 0%, transparent 70%),
+        radial-gradient(ellipse 60% 40% at 90% 80%, rgba(30, 64, 175, 0.10) 0%, transparent 60%),
+        var(--bg-deep);
+      color: var(--text-primary);
+      font-family: 'Inter', 'SF Pro Display', -apple-system, system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      min-height: 100vh;
+      /* Enable subpixel antialiasing for crisper text */
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       3. LAYOUT SHELL
+       ═══════════════════════════════════════════════════════════════════════ */
+    .app-wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      max-width: var(--chat-max-width);
+      margin: 0 auto;
+      padding: 24px 16px 32px;
+      min-height: 100vh;
+      gap: 16px;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       4. HEADER
+       ═══════════════════════════════════════════════════════════════════════ */
+    .app-header {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 4px 0;
+    }
+
+    /* Animated live dot next to the title */
+    .logo-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent-glow);
+      flex-shrink: 0;
+      /* Gentle pulse so it looks "alive" */
+      animation: logo-pulse 3s ease-in-out infinite;
+    }
+
+    @keyframes logo-pulse {
+      0%, 100% { opacity: 1;   transform: scale(1);    }
+      50%       { opacity: 0.6; transform: scale(0.85); }
+    }
+
+    .app-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text-primary);
+    }
+
+    /* Small chip showing the model name */
+    .model-badge {
+      margin-left: auto;
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      background: var(--bg-card);
+      border: 1px solid var(--glass-border);
+      border-radius: 100px;
+      padding: 3px 10px;
+      letter-spacing: 0.02em;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       5. BROWSER COMPATIBILITY WARNING
+       Shown only if SpeechRecognition or SpeechSynthesis is unavailable.
+       ═══════════════════════════════════════════════════════════════════════ */
+    .compat-warning {
+      width: 100%;
+      background: rgba(239, 68, 68, 0.10);
+      border: 1px solid rgba(239, 68, 68, 0.28);
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      font-size: 0.85rem;
+      color: #fca5a5;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .compat-warning.hidden { display: none; }
+
+    .compat-warning-icon {
+      font-size: 1rem;
+      line-height: 1.4;
+      flex-shrink: 0;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       6. CHAT LOG (message list)
+       ═══════════════════════════════════════════════════════════════════════ */
+    .chat-log {
+      width: 100%;
+      flex: 1;
+      /* Glassmorphism card */
+      background: var(--bg-card);
+      backdrop-filter: blur(24px) saturate(160%);
+      -webkit-backdrop-filter: blur(24px) saturate(160%);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-lg);
+      box-shadow:
+        0 8px 40px rgba(0, 0, 0, 0.5),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      /* Scrollable when conversation grows */
+      overflow-y: auto;
+      min-height: 300px;
+      max-height: var(--chat-height);
+      scroll-behavior: smooth;
+    }
+
+    /* Thin custom scrollbar */
+    .chat-log::-webkit-scrollbar        { width: 4px; }
+    .chat-log::-webkit-scrollbar-track  { background: transparent; }
+    .chat-log::-webkit-scrollbar-thumb  { background: var(--glass-border); border-radius: 4px; }
+
+    /* ── Empty state ── */
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      text-align: center;
+      color: var(--text-muted);
+      padding: 40px 20px;
+      /* Fade out when first message arrives */
+      transition: opacity var(--transition);
+    }
+
+    .empty-state.hidden { display: none; }
+
+    .empty-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: var(--bg-card);
+      border: 1px solid var(--glass-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.6rem;
+    }
+
+    .empty-state p {
+      font-size: 0.9rem;
+      line-height: 1.5;
+      max-width: 240px;
+      color: var(--text-muted);
+    }
+
+    /* ── Message bubbles ── */
+    .message {
+      max-width: 78%;
+      padding: 11px 15px;
+      border-radius: var(--radius-md);
+      font-size: 0.92rem;
+      line-height: 1.55;
+      word-break: break-word;
+      /* Slide-in animation for each new message */
+      animation: msg-appear 0.3s var(--ease-out);
+    }
+
+    @keyframes msg-appear {
+      from { opacity: 0; transform: translateY(10px) scale(0.97); }
+      to   { opacity: 1; transform: translateY(0)    scale(1); }
+    }
+
+    /* User message — right side, violet gradient */
+    .message.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+      box-shadow: 0 4px 16px rgba(124, 58, 237, 0.3);
+    }
+
+    /* Assistant message — left side, glass card */
+    .message.assistant {
+      align-self: flex-start;
+      background: var(--glass-hover);
+      border: 1px solid var(--glass-border);
+      color: var(--text-primary);
+      border-bottom-left-radius: 4px;
+    }
+
+    /* ── Thinking indicator (animated dots while waiting for API) ── */
+    .thinking-row {
+      align-self: flex-start;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: var(--glass-hover);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-md);
+      border-bottom-left-radius: 4px;
+      animation: msg-appear 0.3s var(--ease-out);
+    }
+
+    .thinking-row.hidden { display: none; }
+
+    .thinking-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--text-secondary);
+      animation: dot-bounce 1.3s ease-in-out infinite;
+    }
+
+    .thinking-dot:nth-child(2) { animation-delay: 0.18s; }
+    .thinking-dot:nth-child(3) { animation-delay: 0.36s; }
+
+    @keyframes dot-bounce {
+      0%, 80%, 100% { transform: scale(0.65); opacity: 0.35; }
+      40%            { transform: scale(1.0);  opacity: 1.0;  }
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       7. ERROR BANNER
+       ═══════════════════════════════════════════════════════════════════════ */
+    .error-banner {
+      width: 100%;
+      background: rgba(239, 68, 68, 0.10);
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      border-radius: var(--radius-sm);
+      padding: 11px 15px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #fca5a5;
+      font-size: 0.875rem;
+      /* Slide-in from above */
+      animation: banner-appear 0.25s var(--ease-out);
+    }
+
+    @keyframes banner-appear {
+      from { opacity: 0; transform: translateY(-6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .error-banner.hidden { display: none; }
+
+    .error-banner-icon {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: rgba(239, 68, 68, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: #f87171;
+      flex-shrink: 0;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       8. CONTROLS AREA (mic button + status label)
+       ═══════════════════════════════════════════════════════════════════════ */
+    .controls-area {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      padding-top: 4px;
+    }
+
+    /* Wrapper holds the mic button and the processing spinner overlay */
+    .mic-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      /* Extra space for the pulsing ring to breathe */
+      padding: 16px;
+    }
+
+    /* ── The mic button itself ── */
+    .mic-btn {
+      position: relative;
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      /* Violet in idle state */
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%);
+      box-shadow: 0 0 0 0 var(--accent-glow), 0 8px 24px rgba(0, 0, 0, 0.4);
+      transition: background var(--transition), box-shadow var(--transition), transform var(--transition-fast);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      outline: none;
+      /* Needed so the ::after spinner positions correctly */
+      z-index: 0;
+    }
+
+    /* Hover lift — only when the button is interactive */
+    .mic-btn:not(:disabled):hover {
+      transform: scale(1.07);
+      box-shadow:
+        0 0 0 8px rgba(124, 58, 237, 0.15),
+        0 12px 32px rgba(0, 0, 0, 0.5);
+    }
+
+    .mic-btn:not(:disabled):active {
+      transform: scale(0.96);
+    }
+
+    /* ── Recording state: red + pulsing ring ── */
+    .mic-btn.recording {
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      box-shadow:
+        0 0 0 0 rgba(239, 68, 68, 0.6),
+        0 8px 24px rgba(0, 0, 0, 0.4);
+      animation: pulse-ring 1.4s ease-out infinite;
+    }
+
+    @keyframes pulse-ring {
+      0%   { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0.6), 0 8px 24px rgba(0,0,0,0.4); }
+      70%  { box-shadow: 0 0 0 22px rgba(239, 68, 68, 0),  0 8px 24px rgba(0,0,0,0.4); }
+      100% { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0),  0 8px 24px rgba(0,0,0,0.4); }
+    }
+
+    /* ── Processing state: dim + spinning ring overlay ── */
+    .mic-btn.processing {
+      background: var(--bg-mid);
+      box-shadow: 0 0 0 1px var(--glass-border), 0 8px 24px rgba(0, 0, 0, 0.4);
+      cursor: not-allowed;
+    }
+
+    /* Spinner drawn with a border trick on a pseudo-element */
+    .mic-btn.processing::after {
+      content: '';
+      position: absolute;
+      inset: -5px;                   /* slightly larger than the button */
+      border-radius: 50%;
+      border: 2px solid transparent;
+      border-top-color: var(--accent);
+      border-right-color: rgba(124, 58, 237, 0.3);
+      animation: spin 0.75s linear infinite;
+      pointer-events: none;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* ── Speaking state: cyan glow, non-interactive ── */
+    .mic-btn.speaking {
+      background: var(--bg-mid);
+      box-shadow:
+        0 0 0 1px rgba(34, 211, 238, 0.3),
+        0 0 28px var(--cyan-glow),
+        0 8px 24px rgba(0, 0, 0, 0.4);
+      cursor: not-allowed;
+    }
+
+    /* ── Error state: amber outline ── */
+    .mic-btn.error {
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%);
+      box-shadow:
+        0 0 0 2px rgba(245, 158, 11, 0.4),
+        0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+
+    .mic-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    /* SVG icons inside the button */
+    .mic-btn svg {
+      width: 28px;
+      height: 28px;
+      fill: none;
+      stroke: #fff;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      pointer-events: none;
+      transition: opacity var(--transition-fast);
+    }
+
+    /* ── Status text below the button ── */
+    .status-label {
+      font-size: 0.75rem;
+      font-weight: 500;
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      transition: color var(--transition);
+    }
+
+    .status-label.recording  { color: var(--red);          }
+    .status-label.processing { color: var(--accent-light);  }
+    .status-label.speaking   { color: var(--cyan);          }
+    .status-label.error      { color: var(--amber);         }
+
+    /* ── Keyboard hint ── */
+    .keyboard-hint {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      opacity: 0.7;
+    }
+
+    kbd {
+      display: inline-block;
+      padding: 1px 5px;
+      background: var(--bg-card);
+      border: 1px solid var(--glass-border);
+      border-radius: 4px;
+      font-size: 0.68rem;
+      font-family: inherit;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       9. HTTPS NOTICE (Chrome requires HTTPS for SpeechRecognition in prod)
+       ═══════════════════════════════════════════════════════════════════════ */
+    .https-notice {
+      width: 100%;
+      background: rgba(245, 158, 11, 0.08);
+      border: 1px solid rgba(245, 158, 11, 0.2);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      font-size: 0.8rem;
+      color: #fcd34d;
+    }
+
+    .https-notice.hidden { display: none; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       10. WELCOME / SPLASH SCREEN
+       Full-screen overlay shown on first load. Dismissed by clicking "Launch"
+       or pressing Enter/Space. Fades out smoothly to reveal the main app.
+       ═══════════════════════════════════════════════════════════════════════ */
+
+    /* Overlay covers the whole viewport, sits above the main app (z-index 100) */
+    .welcome-screen {
+      position: fixed;
+      inset: 0;                         /* top/right/bottom/left: 0 */
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 20px;
+      /* Match the main background gradient */
+      background:
+        radial-gradient(ellipse 70% 50% at 20% 30%, rgba(109, 40, 217, 0.25) 0%, transparent 65%),
+        radial-gradient(ellipse 50% 40% at 80% 70%, rgba(30, 64, 175, 0.14) 0%, transparent 55%),
+        radial-gradient(ellipse 80% 60% at 50% 50%, rgba(76, 29, 149, 0.10) 0%, transparent 70%),
+        var(--bg-deep);
+      /* Fade in when first rendered */
+      animation: welcome-fadein 0.8s var(--ease-out) both;
+      overflow-y: auto;
+    }
+
+    /* Fade-out class added by JS when user clicks Launch */
+    .welcome-screen.dismissing {
+      animation: welcome-fadeout 0.55s var(--ease-in-out) both;
+      pointer-events: none;
+    }
+
+    @keyframes welcome-fadein {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+
+    @keyframes welcome-fadeout {
+      from { opacity: 1; transform: scale(1);     }
+      to   { opacity: 0; transform: scale(1.025); }
+    }
+
+    /* ── Inner card ── */
+    .welcome-card {
+      width: 100%;
+      max-width: 660px;
+      background: rgba(255, 255, 255, 0.04);
+      backdrop-filter: blur(28px) saturate(160%);
+      -webkit-backdrop-filter: blur(28px) saturate(160%);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: var(--radius-xl);
+      box-shadow:
+        0 0 0 1px rgba(124, 58, 237, 0.15),
+        0 24px 64px rgba(0, 0, 0, 0.6),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      padding: 48px 44px 40px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+      /* Staggered slide-up */
+      animation: welcome-card-in 0.9s 0.1s var(--ease-out) both;
+    }
+
+    @keyframes welcome-card-in {
+      from { opacity: 0; transform: translateY(28px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Icon at top of card ── */
+    .welcome-icon {
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent) 0%, #4f46e5 100%);
+      box-shadow: 0 0 32px var(--accent-glow), 0 8px 24px rgba(0,0,0,0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      margin-bottom: 28px;
+      animation: icon-pulse 4s ease-in-out infinite;
+    }
+
+    @keyframes icon-pulse {
+      0%, 100% { box-shadow: 0 0 24px var(--accent-glow), 0 8px 24px rgba(0,0,0,0.4); }
+      50%       { box-shadow: 0 0 48px var(--accent-glow), 0 8px 24px rgba(0,0,0,0.4); }
+    }
+
+    /* ── Project title ── */
+    .welcome-title {
+      font-size: clamp(1.25rem, 3.5vw, 1.65rem);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.25;
+      text-align: center;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+    }
+
+    /* Violet gradient on key words */
+    .welcome-title span {
+      background: linear-gradient(90deg, var(--accent-light), var(--cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    /* ── Thin divider line ── */
+    .welcome-divider {
+      width: 48px;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), var(--cyan));
+      border-radius: 2px;
+      margin: 22px 0;
+      opacity: 0.6;
+    }
+
+    /* ── "Team Members" label ── */
+    .welcome-team-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+
+    /* ── Members grid: 2 columns ── */
+    .welcome-members {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 24px;
+      width: 100%;
+      margin-bottom: 36px;
+    }
+
+    /* Each member row */
+    .welcome-member {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 10px 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: var(--radius-sm);
+      /* Staggered pop-in */
+      animation: member-in 0.5s var(--ease-out) both;
+    }
+
+    /* Delay each member card so they cascade in */
+    .welcome-member:nth-child(1) { animation-delay: 0.35s; }
+    .welcome-member:nth-child(2) { animation-delay: 0.42s; }
+    .welcome-member:nth-child(3) { animation-delay: 0.49s; }
+    .welcome-member:nth-child(4) { animation-delay: 0.56s; }
+    .welcome-member:nth-child(5) { animation-delay: 0.63s; }
+    .welcome-member:nth-child(6) { animation-delay: 0.70s; }
+
+    @keyframes member-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .welcome-member-name {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .welcome-member-usn {
+      font-size: 0.72rem;
+      font-weight: 400;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    }
+
+    /* ── Launch button ── */
+    .welcome-launch-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 36px;
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%);
+      color: #fff;
+      font-size: 0.9rem;
+      font-weight: 600;
+      font-family: inherit;
+      letter-spacing: 0.02em;
+      border: none;
+      border-radius: 100px;
+      cursor: pointer;
+      box-shadow: 0 0 24px var(--accent-glow), 0 8px 20px rgba(0,0,0,0.3);
+      transition: var(--transition);
+      animation: btn-in 0.5s 0.75s var(--ease-out) both;
+    }
+
+    @keyframes btn-in {
+      from { opacity: 0; transform: scale(0.9); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+
+    .welcome-launch-btn:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 36px var(--accent-glow), 0 12px 28px rgba(0,0,0,0.35);
+    }
+
+    .welcome-launch-btn:active {
+      transform: scale(0.98);
+    }
+
+    .welcome-launch-btn svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    /* ── College / department tag ── */
+    .welcome-footer-tag {
+      margin-top: 20px;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+      text-align: center;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       11. RESPONSIVE — smaller screens
+       ═══════════════════════════════════════════════════════════════════════ */
+    @media (max-width: 520px) {
+      .welcome-card    { padding: 36px 20px 32px; border-radius: var(--radius-lg); }
+      .welcome-members { grid-template-columns: 1fr; } /* single column on mobile */
+      .welcome-title   { font-size: 1.1rem; }
+    }
+
+    @media (max-width: 480px) {
+      .app-wrapper { padding: 16px 12px 24px; }
+      .chat-log    { min-height: 240px; padding: 14px; }
+      .message     { max-width: 90%; }
+      .mic-btn     { width: 64px; height: 64px; }
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       WELCOME / SPLASH SCREEN
+       Shown on load. "Launch" button fades it out to reveal the main app.
+       Pressing Enter or Space also triggers the launch.
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <div class="welcome-screen" id="welcomeScreen" role="dialog" aria-modal="true"
+       aria-label="Project introduction">
+
+    <div class="welcome-card">
+
+      <!-- Animated icon -->
+      <div class="welcome-icon" aria-hidden="true">🎙️</div>
+
+      <!-- Project title -->
+      <h1 class="welcome-title">
+        Voice-Based Interactive<br />
+        <span>Learning Robot</span><br />
+        for School Students
+      </h1>
+
+      <!-- Divider -->
+      <div class="welcome-divider" aria-hidden="true"></div>
+
+      <!-- Team section label -->
+      <p class="welcome-team-label" aria-label="Team members">Team Members</p>
+
+      <!-- Members grid — 2 columns, 6 members -->
+      <div class="welcome-members" role="list">
+
+        <div class="welcome-member" role="listitem">
+          <span class="welcome-member-name">Preetham D</span>
+          <span class="welcome-member-usn">1OX25AI056</span>
+        </div>
+
+        <div class="welcome-member" role="listitem">
+          <span class="welcome-member-name">Prem Samarth Reddy B</span>
+          <span class="welcome-member-usn">1OX25AI057</span>
+        </div>
+
+        <div class="welcome-member" role="listitem">
+          <span class="welcome-member-name">Suhas S H</span>
+          <span class="welcome-member-usn">1OX25AI070</span>
+        </div>
+
+        <div class="welcome-member" role="listitem">
+          <span class="welcome-member-name">Punith C Y</span>
+          <span class="welcome-member-usn">1OX25AI059</span>
+        </div>
+
+        <div class="welcome-member" role="listitem">
+          <span class="welcome-member-name">P Chandan</span>
+          <span class="welcome-member-usn">1OX25AI050</span>
+        </div>
+
+        <div class="welcome-member" role="listitem">
+          <span class="welcome-member-name">Samarth Vaddodagi</span>
+          <span class="welcome-member-usn">1OX25AI066</span>
+        </div>
+
+      </div><!-- /.welcome-members -->
+
+      <!-- Launch button -->
+      <button class="welcome-launch-btn" id="launchBtn" aria-label="Launch the voice assistant">
+        <!-- Right-arrow icon -->
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12 8 16 12 12 16" />
+          <line x1="8" y1="12" x2="16" y2="12" />
+        </svg>
+        Launch
+      </button>
+
+      <!-- Footer tag -->
+      <p class="welcome-footer-tag">
+        Dept. of Artificial Intelligence &amp; Machine Learning
+      </p>
+
+    </div><!-- /.welcome-card -->
+  </div><!-- /#welcomeScreen -->
+
+
+  <div class="app-wrapper" role="main">
+
+    <!-- ── HEADER ─────────────────────────────────────────────────── -->
+    <header class="app-header" aria-label="Application header">
+      <!-- Animated dot gives a "live" feel -->
+      <div class="logo-dot" aria-hidden="true"></div>
+      <h1 class="app-title">Voice Assistant</h1>
+      <!-- Shows the active model name from the server -->
+      <span class="model-badge" id="modelBadge" aria-label="Active AI model">GPT-4o Mini</span>
+    </header>
+
+    <!-- ── BROWSER COMPATIBILITY WARNING ──────────────────────────── -->
+    <!-- Hidden by default; JS shows it if APIs are missing -->
+    <div
+      class="compat-warning hidden"
+      id="compatWarning"
+      role="alert"
+      aria-live="assertive"
+    >
+      <span class="compat-warning-icon" aria-hidden="true">⚠️</span>
+      <span id="compatWarningText">
+        Your browser does not support voice features.
+        Please use Chrome, Edge, or Safari (desktop).
+      </span>
+    </div>
+
+    <!-- ── HTTPS NOTICE ────────────────────────────────────────────── -->
+    <!-- Chrome blocks SpeechRecognition on plain HTTP in production -->
+    <div class="https-notice hidden" id="httpsNotice" role="status">
+      ⚠️ Voice input requires HTTPS when not on localhost.
+      If running on a remote server, access it over <code>https://</code>.
+    </div>
+
+    <!-- ── CHAT LOG ────────────────────────────────────────────────── -->
+    <!--
+      role="log" + aria-live="polite" tells screen readers to announce
+      new messages without interrupting what they're already reading.
+    -->
+    <section
+      class="chat-log"
+      id="chatLog"
+      role="log"
+      aria-label="Conversation"
+      aria-live="polite"
+    >
+      <!-- Empty state shown until the first message -->
+      <div class="empty-state" id="emptyState" aria-hidden="true">
+        <div class="empty-icon" aria-hidden="true">🎙️</div>
+        <p>Tap the microphone and start speaking.<br />Your conversation will appear here.</p>
+      </div>
+
+      <!-- Thinking dots — shown while waiting for the API response -->
+      <div class="thinking-row hidden" id="thinkingRow" aria-label="Assistant is thinking" role="status">
+        <div class="thinking-dot" aria-hidden="true"></div>
+        <div class="thinking-dot" aria-hidden="true"></div>
+        <div class="thinking-dot" aria-hidden="true"></div>
+      </div>
+
+      <!-- Actual message bubbles are injected here by JS -->
+    </section>
+
+    <!-- ── ERROR BANNER ────────────────────────────────────────────── -->
+    <div
+      class="error-banner hidden"
+      id="errorBanner"
+      role="alert"
+      aria-live="assertive"
+    >
+      <span class="error-banner-icon" aria-hidden="true">!</span>
+      <span id="errorText">Something went wrong.</span>
+    </div>
+
+    <!-- ── CONTROLS ────────────────────────────────────────────────── -->
+    <footer class="controls-area" aria-label="Voice controls">
+
+      <!-- Mic button wrapper (the spinner pseudo-element needs a positioned parent) -->
+      <div class="mic-wrapper">
+        <button
+          class="mic-btn"
+          id="micBtn"
+          aria-label="Start recording"
+          title="Click to speak (or press Space)"
+        >
+          <!--
+            Two SVG icons — only one is visible at a time.
+            #iconMic  → shown in idle / error states
+            #iconStop → shown while recording
+          -->
+
+          <!-- Microphone icon -->
+          <svg id="iconMic" viewBox="0 0 24 24" aria-hidden="true">
+            <!-- Mic capsule -->
+            <rect x="9" y="2" width="6" height="12" rx="3" />
+            <!-- Stand -->
+            <path d="M5 10a7 7 0 0 0 14 0" />
+            <!-- Pole -->
+            <line x1="12" y1="19" x2="12" y2="22" />
+            <!-- Base -->
+            <line x1="8"  y1="22" x2="16" y2="22" />
+          </svg>
+
+          <!-- Stop / square icon (shown while recording) -->
+          <svg id="iconStop" viewBox="0 0 24 24" aria-hidden="true" style="display:none;">
+            <rect x="6" y="6" width="12" height="12" rx="2" stroke="none" fill="white" />
+          </svg>
+
+          <!-- Speaker / wave icon (shown while speaking) -->
+          <svg id="iconSpeak" viewBox="0 0 24 24" aria-hidden="true" style="display:none;">
+            <polygon points="11,5 6,9 2,9 2,15 6,15 11,19" fill="white" stroke="none"/>
+            <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+            <path d="M19 5a10 10 0 0 1 0 14" />
+          </svg>
+        </button>
+      </div>
+
+      <!-- Current state label -->
+      <p class="status-label" id="statusLabel" aria-live="polite">Tap to speak</p>
+
+      <!-- Keyboard shortcut hint -->
+      <p class="keyboard-hint" id="keyboardHint">
+        Press <kbd>Space</kbd> to toggle recording
+      </p>
+    </footer>
+
+  </div><!-- /.app-wrapper -->
+
+
+  <script>
+    /*
+     * ════════════════════════════════════════════════════════════════════════
+     *  VOICE CHATBOT — CLIENT-SIDE STATE MACHINE
+     * ════════════════════════════════════════════════════════════════════════
+     *
+     *  States:
+     *    idle       → Button violet, label "Tap to speak", mic icon visible
+     *    recording  → Button red + pulsing, label "Listening…", stop icon
+     *    processing → Button dimmed + spinner, label "Thinking…", dots visible
+     *    speaking   → Button cyan glow, label "Speaking…", speaker icon
+     *    error      → Button amber outline, label "Error — tap to retry"
+     *
+     *  Flow:
+     *    idle  ──[click]──>  recording
+     *    recording  ──[speech result]──>  processing
+     *    recording  ──[error / nomatch / click stop]──>  idle | error
+     *    processing  ──[API ok]──>  speaking
+     *    processing  ──[API fail]──>  error
+     *    speaking  ──[utterance end]──>  idle
+     *    error  ──[click]──>  recording   (auto-reset)
+     */
+
+    'use strict';
+
+    /* ════════════════════════════════════════════════════════════════════════
+     *  WELCOME SCREEN — dismiss logic
+     *  The overlay fades out on: Launch button click, Enter key, Space key.
+     *  After the CSS transition ends (550ms) the element is removed from the
+     *  DOM entirely so it doesn't intercept any pointer events.
+     * ════════════════════════════════════════════════════════════════════════ */
+    (function initWelcome() {
+      const screen    = document.getElementById('welcomeScreen');
+      const launchBtn = document.getElementById('launchBtn');
+
+      // Guard: if somehow the element is missing, do nothing
+      if (!screen || !launchBtn) return;
+
+      /** Animate the overlay out and then remove it from the DOM. */
+      function dismiss() {
+        screen.classList.add('dismissing');
+
+        // Remove after the CSS animation duration (550ms) so it's truly gone
+        screen.addEventListener('animationend', () => {
+          screen.remove();
+          // Move focus to the mic button so keyboard users can continue
+          const mic = document.getElementById('micBtn');
+          if (mic) mic.focus();
+        }, { once: true });
+      }
+
+      // Click the Launch button
+      launchBtn.addEventListener('click', dismiss);
+
+      // Keyboard shortcut: Enter or Space anywhere on the welcome screen
+      screen.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          dismiss();
+        }
+      });
+
+      // Focus the Launch button on load so Enter works immediately
+      launchBtn.focus();
+    })();
+
+    /* ── DOM references ──────────────────────────────────────────────────── */
+    const micBtn        = document.getElementById('micBtn');
+    const statusLabel   = document.getElementById('statusLabel');
+    const chatLog       = document.getElementById('chatLog');
+    const emptyState    = document.getElementById('emptyState');
+    const thinkingRow   = document.getElementById('thinkingRow');
+    const errorBanner   = document.getElementById('errorBanner');
+    const errorText     = document.getElementById('errorText');
+    const compatWarning = document.getElementById('compatWarning');
+    const compatWarnTxt = document.getElementById('compatWarningText');
+    const httpsNotice   = document.getElementById('httpsNotice');
+    const iconMic       = document.getElementById('iconMic');
+    const iconStop      = document.getElementById('iconStop');
+    const iconSpeak     = document.getElementById('iconSpeak');
+
+    /* ── State ───────────────────────────────────────────────────────────── */
+    // Valid values: 'idle' | 'recording' | 'processing' | 'speaking' | 'error'
+    let currentState = 'idle';
+
+    // Whether SpeechRecognition is available in this browser
+    let speechSupported   = false;
+    // Whether SpeechSynthesis is available
+    let synthesisSupported = false;
+
+    // Voices array — populated asynchronously
+    let voices = [];
+
+    // The SpeechRecognition instance (created once)
+    let recognition = null;
+
+    /* ════════════════════════════════════════════════════════════════════════
+     *  INITIALISATION
+     * ════════════════════════════════════════════════════════════════════════ */
+    (function init() {
+
+      /* ── 1. Feature detection: SpeechRecognition ─────────────────────── */
+      const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition || null;
+
+      if (SpeechRecognition) {
+        speechSupported = true;
+        recognition = new SpeechRecognition();
+        setupRecognition(recognition);
+      } else {
+        // Browser doesn't support STT — show a permanent warning
+        compatWarnTxt.textContent =
+          'Your browser does not support speech recognition. ' +
+          'Please use Chrome, Edge, or Safari on desktop.';
+        compatWarning.classList.remove('hidden');
+        micBtn.disabled = true;
+        console.warn('[VoiceBot] SpeechRecognition API not available.');
+      }
+
+      /* ── 2. Feature detection: SpeechSynthesis ───────────────────────── */
+      if ('speechSynthesis' in window) {
+        synthesisSupported = true;
+        // Voices load asynchronously in Chrome/Firefox — cache them when ready
+        window.speechSynthesis.onvoiceschanged = () => {
+          voices = window.speechSynthesis.getVoices();
+        };
+        // Load immediately in case they're already available (Safari)
+        voices = window.speechSynthesis.getVoices();
+      } else {
+        // TTS not available — we'll still show text, just skip audio output
+        console.warn('[VoiceBot] SpeechSynthesis API not available.');
+        if (!speechSupported) {
+          // Both APIs missing — update warning text
+          compatWarnTxt.textContent =
+            'Your browser supports neither speech recognition nor synthesis. ' +
+            'Please use Chrome, Edge, or Safari on desktop.';
+        }
+        // Not a showstopper — text still works, so don't block the mic
+      }
+
+      /* ── 3. HTTPS check ─────────────────────────────────────────────── */
+      // SpeechRecognition in Chrome requires HTTPS (except on localhost)
+      const isLocalhost =
+        location.hostname === 'localhost' ||
+        location.hostname === '127.0.0.1' ||
+        location.hostname === '0.0.0.0';
+
+      if (!isLocalhost && location.protocol !== 'https:') {
+        httpsNotice.classList.remove('hidden');
+        console.warn('[VoiceBot] Not on HTTPS — SpeechRecognition may be blocked.');
+      }
+
+      /* ── 4. Bind mic button ────────────────────────────────────────── */
+      micBtn.addEventListener('click', handleMicClick);
+
+      /* ── 5. Spacebar shortcut ──────────────────────────────────────── */
+      document.addEventListener('keydown', (e) => {
+        // Trigger mic click on Space, but only when no modifier key is held
+        // and the user isn't typing in an input field
+        if (
+          e.code === 'Space' &&
+          !e.ctrlKey && !e.metaKey && !e.altKey &&
+          document.activeElement === document.body
+        ) {
+          e.preventDefault();   // Prevent page scroll
+          handleMicClick();
+        }
+      });
+
+      /* ── 6. Fetch health endpoint to confirm API key is configured ── */
+      fetch('/health')
+        .then(r => r.json())
+        .then(data => {
+          if (!data.api_key_configured) {
+            showError('Server is missing the API key. Check the .env file.');
+          }
+          // Update badge with actual model name if the server sends it
+          if (data.model) {
+            const badge = document.getElementById('modelBadge');
+            // Shorten "google/gemini-2.0-flash-exp:free" → "Gemini 2.0 Flash"
+            badge.textContent = formatModelName(data.model);
+          }
+        })
+        .catch(() => {
+          // Health check failed — server might still work, don't block
+          console.warn('[VoiceBot] Health check failed (server may not be running).');
+        });
+
+    })(); // end init()
+
+    /*
+     * Converts a raw OpenRouter model ID like "openai/gpt-4o-mini" or
+     * "google/gemini-2.0-flash-exp:free" into a readable badge label.
+     *
+     * Examples:
+     *   "openai/gpt-4o-mini"                    → "GPT-4o Mini"
+     *   "nvidia/nemotron-3-nano-30b-a3b:free"   → "Nemotron 3 Nano 30B A3B (free)"
+     *   "google/gemini-2.0-flash-exp:free"       → "Gemini 2.0 Flash Exp (free)"
+     */
+    function formatModelName(id) {
+      // Known pretty-print overrides for common models
+      const KNOWN = {
+        'openai/gpt-4o-mini':          'GPT-4o Mini',
+        'openai/gpt-4o':               'GPT-4o',
+        'openai/gpt-4-turbo':          'GPT-4 Turbo',
+        'anthropic/claude-3-haiku':    'Claude 3 Haiku',
+        'anthropic/claude-3-sonnet':   'Claude 3 Sonnet',
+        'nvidia/nemotron-3-nano-30b-a3b:free': 'Nemotron 30B (free)',
+      };
+      if (KNOWN[id]) return KNOWN[id];
+
+      // Generic fallback: strip provider, tier suffix, then title-case
+      return id
+        .replace(/^[^/]+\//, '')             // remove "openai/"
+        .replace(/:free$/, ' (free)')         // ":free" → " (free)"
+        .replace(/:nitro$/, ' (nitro)')
+        .replace(/-/g, ' ')                   // hyphens → spaces
+        .replace(/\b\w/g, c => c.toUpperCase()); // Title Case
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+     *  STATE MACHINE
+     * ════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * Central state setter — all UI updates happen here.
+     * @param {'idle'|'recording'|'processing'|'speaking'|'error'} state
+     */
+    function setState(state) {
+      currentState = state;
+
+      // Remove all state classes from the button, then add the current one
+      micBtn.classList.remove('recording', 'processing', 'speaking', 'error');
+
+      // Reset all icons to hidden, then show the right one
+      iconMic.style.display   = 'none';
+      iconStop.style.display  = 'none';
+      iconSpeak.style.display = 'none';
+
+      // Button enabled by default
+      micBtn.disabled = false;
+
+      switch (state) {
+
+        case 'idle':
+          iconMic.style.display = '';
+          statusLabel.textContent = 'Tap to speak';
+          statusLabel.className   = 'status-label';
+          micBtn.setAttribute('aria-label', 'Start recording');
+          break;
+
+        case 'recording':
+          micBtn.classList.add('recording');
+          iconStop.style.display = '';
+          statusLabel.textContent = 'Listening…';
+          statusLabel.className   = 'status-label recording';
+          micBtn.setAttribute('aria-label', 'Stop recording');
+          break;
+
+        case 'processing':
+          micBtn.classList.add('processing');
+          iconMic.style.display = '';
+          iconMic.style.opacity = '0.3';
+          statusLabel.textContent = 'Thinking…';
+          statusLabel.className   = 'status-label processing';
+          micBtn.disabled = true;
+          micBtn.setAttribute('aria-label', 'Processing…');
+          break;
+
+        case 'speaking':
+          micBtn.classList.add('speaking');
+          iconSpeak.style.display = '';
+          statusLabel.textContent = 'Speaking…';
+          statusLabel.className   = 'status-label speaking';
+          micBtn.disabled = true;
+          micBtn.setAttribute('aria-label', 'Assistant is speaking');
+          break;
+
+        case 'error':
+          micBtn.classList.add('error');
+          iconMic.style.display = '';
+          iconMic.style.opacity = '';
+          statusLabel.textContent = 'Tap to retry';
+          statusLabel.className   = 'status-label error';
+          micBtn.setAttribute('aria-label', 'Retry recording');
+          break;
+
+        default:
+          console.warn('[VoiceBot] Unknown state:', state);
+      }
+
+      // Restore icon opacity when not processing
+      if (state !== 'processing') {
+        iconMic.style.opacity = '';
+      }
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+     *  MIC BUTTON HANDLER
+     * ════════════════════════════════════════════════════════════════════════ */
+
+    function handleMicClick() {
+      // Guard: if the APIs were not found, do nothing
+      if (!speechSupported) return;
+
+      switch (currentState) {
+        case 'idle':
+        case 'error':
+          // Clear any previous error and start recording
+          hideError();
+          startRecording();
+          break;
+
+        case 'recording':
+          // Manual stop — recognition.onend will fire and handle state
+          recognition.stop();
+          break;
+
+        case 'processing':
+        case 'speaking':
+          // Clicks during these states are intentionally ignored
+          // (button is also disabled via CSS, but JS guard is belt-and-suspenders)
+          break;
+      }
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+     *  SPEECH RECOGNITION
+     * ════════════════════════════════════════════════════════════════════════ */
+
+    /** Attach all event handlers to the SpeechRecognition instance. */
+    function setupRecognition(rec) {
+      // Target language — edit here to support other locales
+      rec.lang = 'en-US';
+
+      // Single utterance mode: recognition stops after the first pause
+      rec.continuous = false;
+
+      // We only want the final, confirmed transcript — not partial guesses
+      rec.interimResults = false;
+
+      // Take the best guess the engine has
+      rec.maxAlternatives = 1;
+
+      /* ── onstart: fires when mic opens ─────────────────────────────── */
+      rec.onstart = () => {
+        setState('recording');
+        console.log('[VoiceBot] Recording started.');
+      };
+
+      /* ── onresult: fires with the transcribed text ──────────────────── */
+      rec.onresult = (event) => {
+        const transcript = event.results[0][0].transcript.trim();
+        const confidence = event.results[0][0].confidence;
+        console.log(`[VoiceBot] Transcript: "${transcript}" (confidence: ${(confidence * 100).toFixed(0)}%)`);
+
+        // Edge case: engine fired but transcript is empty
+        if (!transcript) {
+          showError("Didn't catch that. Please speak more clearly.");
+          setState('error');
+          return;
+        }
+
+        // Display the user's message and kick off the API call
+        appendMessage('user', transcript);
+        sendToServer(transcript);
+      };
+
+      /* ── onnomatch: engine heard audio but couldn't match speech ─────── */
+      rec.onnomatch = () => {
+        console.warn('[VoiceBot] No speech matched.');
+        showError("Couldn't understand that. Please try again.");
+        setState('error');
+      };
+
+      /* ── onerror: handles all SpeechRecognition error types ────────── */
+      rec.onerror = (event) => {
+        console.error('[VoiceBot] SpeechRecognition error:', event.error);
+
+        // Map error codes to user-friendly messages
+        const errorMessages = {
+          'not-allowed':         'Microphone access was denied. Please allow microphone permission in your browser settings.',
+          'permission-denied':   'Microphone access was denied. Please allow microphone permission in your browser settings.',
+          'audio-capture':       'No microphone detected. Please connect a microphone and try again.',
+          'no-speech':           'No speech detected. Please tap the mic and speak.',
+          'network':             'A network error occurred during speech recognition. Check your connection.',
+          'service-not-allowed': 'Speech recognition is not allowed. Try using HTTPS or a supported browser.',
+          'bad-grammar':         'There was an issue with the recognition grammar. Please try again.',
+          'language-not-supported': 'Your language is not supported. The assistant uses English.',
+        };
+
+        if (event.error === 'aborted') {
+          // 'aborted' means recognition was intentionally cancelled (e.g. by calling .stop())
+          // — not a real error, reset silently to idle
+          if (currentState === 'recording') setState('idle');
+          return;
+        }
+
+        const message = errorMessages[event.error] ||
+          `Speech recognition error: ${event.error}. Please try again.`;
+        showError(message);
+        setState('error');
+      };
+
+      /* ── onend: fires after recognition stops (normal or error) ────── */
+      rec.onend = () => {
+        console.log('[VoiceBot] Recognition ended. Current state:', currentState);
+        // If we're still in 'recording' here, recognition ended without a result
+        // (e.g. user pressed stop before speaking). Reset to idle.
+        if (currentState === 'recording') {
+          setState('idle');
+        }
+        // All other transitions (→ processing, → error) already happened in
+        // onresult / onerror / onnomatch before onend fires.
+      };
+    }
+
+    /** Start the recognition session, with a guard against double-starts. */
+    function startRecording() {
+      if (!recognition) return;
+      try {
+        recognition.start();
+        // setState('recording') will be called in rec.onstart
+      } catch (err) {
+        // Thrown if recognition.start() is called while already running
+        if (err.name === 'InvalidStateError') {
+          console.warn('[VoiceBot] Recognition already running — ignoring start.');
+        } else {
+          console.error('[VoiceBot] Unexpected error starting recognition:', err);
+          showError('Could not start the microphone. Please try again.');
+          setState('error');
+        }
+      }
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+     *  API CALL
+     * ════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * POST the user's transcript to /chat and handle the response.
+     * @param {string} message - The transcribed speech text
+     */
+    async function sendToServer(message) {
+      setState('processing');
+      showThinking(true);
+
+      let reply;
+      try {
+        /*
+         * AbortSignal.timeout() sets a hard client-side deadline.
+         * We use 35 seconds — 5 seconds more than the server's 30s timeout —
+         * so the server usually responds (or times out) before the client gives up.
+         */
+        const response = await fetch('/chat', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ message }),
+          signal:  AbortSignal.timeout(35_000),
+        });
+
+        /*
+         * Parse the JSON body regardless of status code.
+         * The server always returns { reply } or { error }, even for 4xx/5xx.
+         */
+        let data;
+        try {
+          data = await response.json();
+        } catch (parseErr) {
+          // The server returned something that's not JSON (e.g. HTML error page)
+          throw new Error(`Unexpected server response (HTTP ${response.status}).`);
+        }
+
+        if (!response.ok) {
+          // Server sent a structured error object — use its message
+          throw new Error(data.error || `Server error ${response.status}.`);
+        }
+
+        // Validate the reply field before using it
+        if (!data.reply || typeof data.reply !== 'string' || data.reply.trim() === '') {
+          throw new Error('Received an empty reply from the server.');
+        }
+
+        reply = data.reply.trim();
+
+      } catch (err) {
+        showThinking(false);
+
+        // Translate fetch errors into helpful messages
+        if (err.name === 'TimeoutError') {
+          showError('The request timed out. Please try again.');
+        } else if (err.name === 'TypeError' && err.message.toLowerCase().includes('failed to fetch')) {
+          showError('Network error. Check your internet connection.');
+        } else {
+          showError(err.message || 'Something went wrong. Please try again.');
+        }
+
+        setState('error');
+        return;
+      }
+
+      showThinking(false);
+      // Display the reply as-is (with proper math symbols like ², √, π)
+      appendMessage('assistant', reply);
+      // TTS needs symbols converted to words — SpeechSynthesis reads "²" as nothing
+      speakReply(normalizeForTTS(reply));
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+     *  MATH / SYMBOL → SPOKEN WORD NORMALIZER
+     *  The display bubble shows the original reply with proper math symbols.
+     *  Before handing text to SpeechSynthesis, we convert every symbol to
+     *  its spoken equivalent — browsers either skip or mangle raw Unicode
+     *  math characters (² is silent, √ is spoken as nothing, π is ignored).
+     * ════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * Convert a string containing math/scientific Unicode symbols into a
+     * version that SpeechSynthesis can read naturally.
+     *
+     * @param {string} text - Raw reply from the server (may contain ², √, π …)
+     * @returns {string} - Text safe to pass to SpeechSynthesisUtterance
+     */
+    function normalizeForTTS(text) {
+      return text
+        // ── Superscript numbers ───────────────────────────────────────────
+        .replace(/²/g, ' squared')
+        .replace(/³/g, ' cubed')
+        .replace(/⁴/g, ' to the power 4')
+        .replace(/⁵/g, ' to the power 5')
+        .replace(/⁶/g, ' to the power 6')
+        .replace(/⁷/g, ' to the power 7')
+        .replace(/⁸/g, ' to the power 8')
+        .replace(/⁹/g, ' to the power 9')
+        .replace(/⁰/g, ' to the power 0')
+        .replace(/¹/g, ' to the power 1')
+        // Caret-notation: x^2, x^n
+        .replace(/\^(\d+)/g, ' to the power $1')
+
+        // ── Roots ─────────────────────────────────────────────────────────
+        .replace(/√/g, 'square root of ')
+        .replace(/∛/g, 'cube root of ')
+
+        // ── Common math constants and symbols ─────────────────────────────
+        // Trailing space on π prevents "πr" becoming "pir" instead of "pi r"
+        .replace(/π/g, 'pi ')
+        .replace(/∞/g, 'infinity')
+        .replace(/°/g, ' degrees')
+        .replace(/±/g, ' plus or minus ')
+
+        // ── Comparison / equality ─────────────────────────────────────────
+        .replace(/≈/g, ' approximately equals ')
+        .replace(/≠/g, ' not equal to ')
+        .replace(/≤/g, ' less than or equal to ')
+        .replace(/≥/g, ' greater than or equal to ')
+
+        // ── Calculus / set notation ────────────────────────────────────────
+        .replace(/∑/g, 'sum of ')
+        .replace(/∏/g, 'product of ')
+        .replace(/∫/g, 'integral of ')
+        .replace(/∂/g, 'partial derivative of ')
+        .replace(/∇/g, 'gradient of ')
+        .replace(/∈/g, ' is in ')
+        .replace(/∉/g, ' is not in ')
+        .replace(/⊂/g, ' is a subset of ')
+        .replace(/∩/g, ' intersect ')
+        .replace(/∪/g, ' union ')
+        .replace(/∅/g, 'empty set')
+        .replace(/∴/g, 'therefore')
+        .replace(/∵/g, 'because')
+
+        // ── Greek letters (common in science / math) ──────────────────────
+        .replace(/α/g, 'alpha')
+        .replace(/β/g, 'beta')
+        .replace(/γ/g, 'gamma')
+        .replace(/Γ/g, 'Gamma')
+        .replace(/δ/g, 'delta')
+        .replace(/Δ/g, 'Delta')
+        .replace(/ε/g, 'epsilon')
+        .replace(/ζ/g, 'zeta')
+        .replace(/η/g, 'eta')
+        .replace(/θ/g, 'theta')
+        .replace(/Θ/g, 'Theta')
+        .replace(/ι/g, 'iota')
+        .replace(/κ/g, 'kappa')
+        .replace(/λ/g, 'lambda')
+        .replace(/Λ/g, 'Lambda')
+        .replace(/μ/g, 'mu')
+        .replace(/ν/g, 'nu')
+        .replace(/ξ/g, 'xi')
+        .replace(/ρ/g, 'rho')
+        .replace(/σ/g, 'sigma')
+        .replace(/Σ/g, 'Sigma')
+        .replace(/τ/g, 'tau')
+        .replace(/φ/g, 'phi')
+        .replace(/Φ/g, 'Phi')
+        .replace(/χ/g, 'chi')
+        .replace(/ψ/g, 'psi')
+        .replace(/Ψ/g, 'Psi')
+        .replace(/ω/g, 'omega')
+        .replace(/Ω/g, 'Omega')
+
+        // ── Fractions ─────────────────────────────────────────────────────
+        .replace(/½/g, 'one half')
+        .replace(/⅓/g, 'one third')
+        .replace(/¼/g, 'one quarter')
+        .replace(/¾/g, 'three quarters')
+
+        // ── Cleanup: collapse multiple spaces left by replacements ─────────
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+     *  TEXT-TO-SPEECH
+     * ════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * Speak the assistant's reply using the Web Speech Synthesis API.
+     * Falls back to silent text display if TTS is unavailable.
+     * @param {string} text - Already-normalized text (symbols converted to words)
+     */
+    function speakReply(text) {
+      if (!synthesisSupported) {
+        // TTS unavailable — text is already visible, just go back to idle
+        setState('idle');
+        return;
+      }
+
+      setState('speaking');
+
+      // Cancel any in-progress speech first (defensive — shouldn't be needed
+      // since we're in 'processing' when we get here, but safety first)
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang   = 'en-US';
+      utterance.rate   = 1.0;    // Natural speed
+      utterance.pitch  = 1.0;
+      utterance.volume = 1.0;
+
+      /* ── Voice selection ─────────────────────────────────────────────
+       * Prefer a natural-sounding voice. Voices load async in Chrome,
+       * so we use the cached `voices` array (populated in onvoiceschanged).
+       * Priority: Google voices → macOS system voices → any en-US voice
+       */
+      if (voices.length === 0) {
+        // Might not be loaded yet — try fetching again right now
+        voices = window.speechSynthesis.getVoices();
+      }
+
+      const preferredVoice =
+        voices.find(v => v.name.includes('Google') && v.lang.startsWith('en')) ||
+        voices.find(v => (v.name === 'Samantha' || v.name === 'Karen' || v.name === 'Daniel') && v.lang.startsWith('en')) ||
+        voices.find(v => v.lang === 'en-US') ||
+        voices.find(v => v.lang.startsWith('en')) ||
+        null; // fallback: let the browser pick
+
+      if (preferredVoice) {
+        utterance.voice = preferredVoice;
+      }
+
+      /* ── Safari TTS stall workaround ──────────────────────────────────
+       * Safari (and occasionally Chrome) silently stalls after cancel().
+       * If speaking hasn't started within 1 second, cancel and re-speak.
+       */
+      let safariFix = setTimeout(() => {
+        if (!window.speechSynthesis.speaking) {
+          console.warn('[VoiceBot] TTS stall detected — retrying speak.');
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(utterance);
+        }
+      }, 1000);
+
+      utterance.onstart = () => {
+        clearTimeout(safariFix);
+        console.log('[VoiceBot] TTS started.');
+      };
+
+      utterance.onend = () => {
+        clearTimeout(safariFix);
+        console.log('[VoiceBot] TTS finished.');
+        setState('idle');
+      };
+
+      utterance.onerror = (event) => {
+        clearTimeout(safariFix);
+        console.error('[VoiceBot] TTS error:', event.error);
+
+        // 'interrupted' and 'canceled' are non-fatal — they just mean the
+        // utterance was cut short (e.g. user navigated away).
+        if (event.error === 'interrupted' || event.error === 'canceled') {
+          setState('idle');
+          return;
+        }
+
+        // Any other error — show a brief notice but don't block the UI
+        showError(`Text-to-speech error: ${event.error}.`);
+        setState('error');
+      };
+
+      window.speechSynthesis.speak(utterance);
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+     *  UI HELPERS
+     * ════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * Append a chat bubble to the conversation log.
+     * @param {'user'|'assistant'} role
+     * @param {string} text
+     */
+    function appendMessage(role, text) {
+      // Hide the empty state on first message
+      emptyState.classList.add('hidden');
+
+      // Build the message element
+      const div = document.createElement('div');
+      div.className = `message ${role}`;
+      div.textContent = text;               // textContent prevents XSS
+      div.setAttribute('aria-label', `${role === 'user' ? 'You' : 'Assistant'}: ${text}`);
+
+      /*
+       * Insert BEFORE the thinking row so that messages appear in order
+       * and the thinking dots always stay at the bottom.
+       */
+      chatLog.insertBefore(div, thinkingRow);
+
+      // Scroll to the newest message
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    /**
+     * Show or hide the animated "thinking" dots in the chat log.
+     * @param {boolean} visible
+     */
+    function showThinking(visible) {
+      thinkingRow.classList.toggle('hidden', !visible);
+      if (visible) {
+        // Keep the dots visible at the bottom when they appear
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+    }
+
+    /**
+     * Display an error message in the banner above the controls.
+     * @param {string} message
+     */
+    function showError(message) {
+      errorText.textContent = message;
+      errorBanner.classList.remove('hidden');
+    }
+
+    /** Hide the error banner. */
+    function hideError() {
+      errorBanner.classList.add('hidden');
+      errorText.textContent = '';
+    }
+
+  </script>
+</body>
+</html>
